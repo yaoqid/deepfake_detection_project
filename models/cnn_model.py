@@ -65,6 +65,46 @@ class DeepfakeCNN(nn.Module):
         patches = feat_maps.flatten(2).permute(0, 2, 1)
         return patches
 
+    def get_gradcam(self, x, target_class=1):
+        """
+        Grad-CAM: highlights which spatial regions drive the prediction
+        toward a specific class (default: Fake=1).
+        Returns: (batch, 7, 7) heatmap
+        """
+        self.eval()
+        x = x.detach().requires_grad_(False)
+
+        # Must enable gradients even in eval mode
+        with torch.enable_grad():
+            # Forward through features with gradient tracking
+            feat_maps = self.features(x)  # (batch, 512, 7, 7)
+            feat_maps.retain_grad()
+
+            pooled = self.pool(feat_maps).flatten(1)
+            logits = self.classifier(pooled)
+
+            # Backward from target class
+            logits[:, target_class].sum().backward()
+
+        # Grad-CAM: weight each channel by its gradient, then ReLU
+        grads = feat_maps.grad  # (batch, 512, 7, 7)
+        weights = grads.mean(dim=(2, 3), keepdim=True)  # (batch, 512, 1, 1)
+        cam = (weights * feat_maps).sum(dim=1)  # (batch, 7, 7)
+        cam = torch.relu(cam)  # only positive contributions
+
+        # Normalize per sample
+        cam = cam.detach()
+        batch_size = cam.shape[0]
+        for i in range(batch_size):
+            cam_min = cam[i].min()
+            cam_max = cam[i].max()
+            if cam_max - cam_min > 0:
+                cam[i] = (cam[i] - cam_min) / (cam_max - cam_min)
+            else:
+                cam[i] = torch.zeros_like(cam[i])
+
+        return cam
+
 
 def get_model(num_classes: int = 2, pretrained: bool = True):
     model = DeepfakeCNN(num_classes=num_classes, pretrained=pretrained)

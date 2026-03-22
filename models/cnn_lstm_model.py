@@ -129,6 +129,53 @@ class DeepfakeCNNLSTM(nn.Module):
         attn_map = attn_weights.squeeze(-1).view(batch, h, w)
         return attn_map
 
+    def get_fake_gradcam(self, x):
+        """
+        Gradient-weighted attention: shows which patches push toward 'Fake'.
+        Uses gradients of the Fake class score w.r.t. LSTM outputs,
+        combined with attention weights for a more accurate heatmap.
+        """
+        self.eval()
+
+        # CNN backbone is frozen
+        with torch.no_grad():
+            feat_maps = self.cnn_backbone(x)  # (batch, 512, 7, 7)
+
+        batch, channels, h, w = feat_maps.shape
+        patches = feat_maps.flatten(2).permute(0, 2, 1)  # (batch, 49, 512)
+
+        # Enable gradient tracking through LSTM
+        with torch.enable_grad():
+            patches_grad = patches.detach().requires_grad_(True)
+            lstm_out, _ = self.lstm(patches_grad)
+
+            attn_scores = self.attention(lstm_out)
+            attn_weights = torch.softmax(attn_scores, dim=1)
+            context = (attn_weights * lstm_out).sum(dim=1)
+
+            logits = self.classifier(context)
+
+            # Gradient of Fake class (index 1) w.r.t. each patch
+            fake_score = logits[:, 1]
+            fake_score.sum().backward(retain_graph=False)
+
+        # Gradient magnitude per patch = how much each patch influences "Fake"
+        grad = patches_grad.grad  # (batch, 49, 512)
+        grad_importance = grad.abs().mean(dim=-1)  # (batch, 49)
+
+        # Combine: attention weights * gradient importance
+        attn_flat = attn_weights.squeeze(-1).detach()  # (batch, 49)
+        combined = attn_flat * grad_importance.detach()  # (batch, 49)
+
+        # Normalize to [0, 1]
+        combined = combined - combined.min(dim=1, keepdim=True)[0]
+        max_val = combined.max(dim=1, keepdim=True)[0]
+        combined = combined / (max_val + 1e-8)
+
+        # Reshape to spatial map
+        gradcam_map = combined.view(batch, h, w)
+        return gradcam_map
+
 
 def get_model(num_classes: int = 2, pretrained: bool = True):
     model = DeepfakeCNNLSTM(num_classes=num_classes, pretrained=pretrained)
