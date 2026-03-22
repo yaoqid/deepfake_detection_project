@@ -204,6 +204,73 @@ def get_test_loader(data_dir: str, batch_size: int = 32):
     return DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=4)
 
 
+# ── Video Processing ─────────────────────────────────────────────────────────
+def extract_frames_from_video(video_path: str, max_frames: int = 30,
+                               sample_rate: int = None) -> list:
+    """
+    Extract frames from a video file.
+
+    Args:
+        video_path: path to video file (.mp4, .avi, .mov, etc.)
+        max_frames: maximum number of frames to extract
+        sample_rate: extract every Nth frame. If None, evenly samples max_frames.
+
+    Returns:
+        List of PIL.Image frames
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    if total_frames <= 0:
+        raise ValueError("Could not read frame count from video")
+
+    # Determine which frames to extract
+    if sample_rate:
+        frame_indices = list(range(0, total_frames, sample_rate))[:max_frames]
+    else:
+        # Evenly sample max_frames across the video
+        if total_frames <= max_frames:
+            frame_indices = list(range(total_frames))
+        else:
+            frame_indices = np.linspace(0, total_frames - 1, max_frames, dtype=int).tolist()
+
+    frames = []
+    for idx in frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, frame = cap.read()
+        if ret:
+            # OpenCV uses BGR, convert to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_frame = Image.fromarray(frame_rgb)
+            frames.append(pil_frame)
+
+    cap.release()
+
+    return frames, fps, total_frames
+
+
+def get_video_info(video_path: str) -> dict:
+    """Get basic video metadata."""
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    info = {
+        "total_frames": int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+        "fps": cap.get(cv2.CAP_PROP_FPS),
+        "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+        "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+    }
+    info["duration_sec"] = info["total_frames"] / info["fps"] if info["fps"] > 0 else 0
+    cap.release()
+    return info
+
+
 # ── Quick test ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("Testing synthetic data...")

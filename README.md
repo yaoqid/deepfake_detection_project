@@ -4,11 +4,20 @@ An end-to-end deepfake detection system using **CNN + CNN-LSTM + DeepSeek LLM**.
 
 ## How It Works
 
+Supports both **image** and **video** analysis.
+
 | Model | Purpose | Data |
 |-------|---------|------|
 | **CNN (ResNet18)** | Classifies face images as Real or Fake | 140K real images |
 | **CNN-LSTM** | Scans face regions as spatial sequence, finds suspicious areas | Same real images |
 | **DeepSeek LLM** | Explains results in plain English, answers questions | API |
+
+### Video Mode
+- Extracts frames from uploaded video
+- Runs CNN + CNN-LSTM on each frame
+- Displays frame-by-frame timeline of fake probability
+- Highlights most suspicious and most authentic frames
+- Interactive frame browser with attention maps
 
 ### Why Two Models?
 
