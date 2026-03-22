@@ -16,6 +16,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
+import cv2
 import tempfile
 import os
 import sys
@@ -60,6 +61,67 @@ def load_models():
 @st.cache_resource
 def load_assistant():
     return DeepfakeAssistant()
+
+
+# ── Face Detection ────────────────────────────────────────────────────────────
+@st.cache_resource
+def load_face_detector():
+    """Load OpenCV's DNN face detector (more accurate than Haar cascades)."""
+    # Use OpenCV's built-in Haar cascade as fallback (always available)
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    detector = cv2.CascadeClassifier(cascade_path)
+    return detector
+
+
+def detect_and_crop_face(image: Image.Image, detector, margin: float = 0.3) -> Image.Image:
+    """
+    Detect the largest face in the image and crop it.
+    If no face is found, returns the original image (center-cropped).
+
+    Args:
+        image: PIL Image
+        detector: OpenCV cascade classifier
+        margin: extra margin around face (0.3 = 30% padding)
+
+    Returns:
+        Cropped face as PIL Image
+    """
+    img_array = np.array(image)
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+
+    # Detect faces
+    faces = detector.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(50, 50)
+    )
+
+    if len(faces) == 0:
+        # No face found - do a center crop (assume face is centered)
+        h, w = img_array.shape[:2]
+        size = min(h, w)
+        top = (h - size) // 2
+        left = (w - size) // 2
+        return image.crop((left, top, left + size, top + size))
+
+    # Pick the largest face
+    areas = [w * h for (x, y, w, h) in faces]
+    largest = faces[np.argmax(areas)]
+    x, y, w, h = largest
+
+    # Add margin
+    img_h, img_w = img_array.shape[:2]
+    margin_x = int(w * margin)
+    margin_y = int(h * margin)
+    x1 = max(0, x - margin_x)
+    y1 = max(0, y - margin_y)
+    x2 = min(img_w, x + w + margin_x)
+    y2 = min(img_h, y + h + margin_y)
+
+    return image.crop((x1, y1, x2, y2))
+
+
+def preprocess_for_model(image: Image.Image, detector) -> Image.Image:
+    """Detect face, crop it, and return the cropped face image."""
+    return detect_and_crop_face(image, detector)
 
 
 # ── Prediction helpers ────────────────────────────────────────────────────────
@@ -119,28 +181,32 @@ def predict_cnn_lstm(model, image: Image.Image) -> dict:
     }
 
 
-def analyse_single_image(cnn_model, lstm_model, image):
-    """Run both models on a single image and return results."""
-    cnn_result = predict_cnn(cnn_model, image)
-    lstm_result = predict_cnn_lstm(lstm_model, image)
-    return cnn_result, lstm_result
+def analyse_single_image(cnn_model, lstm_model, image, detector):
+    """Detect face, crop it, then run both models."""
+    face_crop = preprocess_for_model(image, detector)
+    cnn_result = predict_cnn(cnn_model, face_crop)
+    lstm_result = predict_cnn_lstm(lstm_model, face_crop)
+    return cnn_result, lstm_result, face_crop
 
 
-def analyse_video_frames(cnn_model, lstm_model, frames, progress_bar=None):
-    """Run both models on each frame. Returns per-frame results."""
+def analyse_video_frames(cnn_model, lstm_model, frames, detector, progress_bar=None):
+    """Detect face in each frame, crop, then run both models."""
     cnn_results = []
     lstm_results = []
+    face_crops = []
 
     for i, frame in enumerate(frames):
-        cnn_r = predict_cnn(cnn_model, frame)
-        lstm_r = predict_cnn_lstm(lstm_model, frame)
+        face_crop = preprocess_for_model(frame, detector)
+        face_crops.append(face_crop)
+        cnn_r = predict_cnn(cnn_model, face_crop)
+        lstm_r = predict_cnn_lstm(lstm_model, face_crop)
         cnn_results.append(cnn_r)
         lstm_results.append(lstm_r)
 
         if progress_bar:
             progress_bar.progress((i + 1) / len(frames))
 
-    return cnn_results, lstm_results
+    return cnn_results, lstm_results, face_crops
 
 
 # ── Display helpers ───────────────────────────────────────────────────────────
@@ -328,6 +394,7 @@ def main():
 
     cnn_model, lstm_model = load_models()
     assistant = load_assistant()
+    face_detector = load_face_detector()
 
     # ── Sidebar ───────────────────────────────────────────────────────────
     st.sidebar.header("Settings")
@@ -426,21 +493,30 @@ def main():
             return
 
         if st.button("Analyse Image", type="primary"):
-            with st.spinner("Running analysis..."):
-                cnn_result, lstm_result = analyse_single_image(cnn_model, lstm_model, image)
+            with st.spinner("Detecting face and running analysis..."):
+                cnn_result, lstm_result, face_crop = analyse_single_image(
+                    cnn_model, lstm_model, image, face_detector
+                )
 
             st.session_state["cnn_result"] = cnn_result
             st.session_state["lstm_result"] = lstm_result
+            st.session_state["face_crop"] = face_crop
             st.session_state["mode"] = "image"
             assistant.set_detection_context(cnn_result, lstm_result)
             st.session_state["assistant"] = assistant
             st.session_state["chat_history"] = []
 
         if st.session_state.get("mode") == "image" and "cnn_result" in st.session_state:
+            # Show the detected face crop
+            if "face_crop" in st.session_state:
+                with st.expander("Detected face (input to model)"):
+                    fc1, fc2 = st.columns(2)
+                    fc1.image(image, caption="Original", width=250)
+                    fc2.image(st.session_state["face_crop"], caption="Cropped face (model input)", width=250)
             show_image_results(
                 st.session_state["cnn_result"],
                 st.session_state["lstm_result"],
-                image,
+                st.session_state.get("face_crop", image),
             )
 
     else:  # Video
@@ -452,13 +528,13 @@ def main():
             progress = st.progress(0)
             st.write(f"Analysing {len(frames)} frames...")
 
-            cnn_results, lstm_results = analyse_video_frames(
-                cnn_model, lstm_model, frames, progress_bar=progress
+            cnn_results, lstm_results, face_crops = analyse_video_frames(
+                cnn_model, lstm_model, frames, face_detector, progress_bar=progress
             )
 
             st.session_state["video_cnn_results"] = cnn_results
             st.session_state["video_lstm_results"] = lstm_results
-            st.session_state["video_frames"] = frames
+            st.session_state["video_frames"] = face_crops  # use cropped faces for display
             st.session_state["video_fps"] = fps
             st.session_state["mode"] = "video"
 
